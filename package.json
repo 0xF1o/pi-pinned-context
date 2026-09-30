@@ -1,0 +1,22 @@
+{
+  "name": "pi-pinned-prefix-sliding-context",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Pinned-prefix sliding context policy for Pi Coding Agent",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/0xF1o/pi-pinned-context.git"
+  },
+  "bugs": {
+    "url": "https://github.com/0xF1o/pi-pinned-context/issues"
+  },
+  "homepage": "https://github.com/0xF1o/pi-pinned-context",
+  "keywords": ["pi", "pi-coding-agent", "extension", "context", "compaction"],
+  "main": "./index.ts",
+  "pi": { "extensions": ["./index.ts"] },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.99.1",
+    "@earendil-works/pi-agent-core": ">=0.99.1"
+  }
+}
