@@ -4,28 +4,18 @@ A [Pi Coding Agent](https://github.com/earendil-works/pi) extension that keeps a
 
 It does **not** delete transcript history, summarize messages, use memory/RAG, or disable Pi's normal compaction. Pi compaction remains available as a fallback.
 
-## Install from GitHub
+## Installation
 
-Clone the repository into Pi's extension directory:
+Install the extension from GitHub with:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions
-rm -rf ~/.pi/agent/extensions/pinned-context
-git clone https://github.com/0xF1o/pi-pinned-context.git \
-  ~/.pi/agent/extensions/pinned-context
+pi install https://github.com/0xF1o/pi-pinned-context.git
 ```
 
-Start Pi normally. To load it explicitly while testing:
+To load a local checkout explicitly:
 
 ```bash
-pi --extension ~/.pi/agent/extensions/pinned-context/index.ts
-```
-
-The extension imports Pi types. If the global Pi installation cannot resolve them from the cloned directory, install the package dependencies there:
-
-```bash
-cd ~/.pi/agent/extensions/pinned-context
-npm install --ignore-scripts
+pi --extension ../path/to/pi-pinned-context
 ```
 
 ## Configuration
@@ -68,18 +58,19 @@ The full session remains intact, but the request sent to the model becomes a pin
 Full session / transcript
 
 +------------------+------+------+------+------+------+
-| Pinned system   | T1   | T2   | T3   | T4   | T5   |
-| prompt + tools  |      |      |      |      |      |
+| Pinned system    | T1   | T2   | T3   | T4   | T5   |
+| prompt + tools   |      |      |      |      |      |
 +------------------+------+------+------+------+------+
                     ^^^^^  ^^^^^  ^^^^^  ^^^^^  ^^^^^
                     older turns remain in the transcript
 
 Context request after budget pruning
 
-+------------------+------+------+------+
-| Pinned system   | T3   | T4   | T5   |
-| prompt + tools  |      |      |      |
-+------------------+------+------+------+
++------------------+------+------+------+------+------+
+| Pinned system    | T1   | T2   | T3   | T4   | T5   |
+| prompt + tools   |      |      |      |      |      |
++------------------+------+------+------+------+------+
+                                  ^^^^^  ^^^^^  ^^^^^
                     dropped from this request: T1, T2
 ```
 
