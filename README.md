@@ -35,21 +35,20 @@ Configuration is optional and lives at `~/.pi/agent/pinned-context.json`:
 ```json
 {
   "maxContextPercent": 0.9,
-  "minRecentTurns": 20,
-  "debugLogging": false
+  "minRecentTurns": 20
 }
 ```
 
 - `maxContextPercent`: target fraction of the model context window, from `0.01` to `1`.
 - `minRecentTurns`: minimum number of complete recent turns to retain. Defaults to `20`.
-- `debugLogging`: write pruning statistics to stderr. Defaults to `false`.
 
-The file is reloaded before each model request. Runtime debug overrides are available with `/pinned-context-debug on|off`.
+The file is reloaded before each model request. Use `/pinned-context-min-turns <n>` to override `minRecentTurns` for the active session without changing the file. Use `/pinned-context-set-turns <n>` when an exact recent-turn limit is desired.
 
 ## Commands
 
-- `/pinned-context-status` — show statistics for the last filtered request.
-- `/pinned-context-debug on|off` — enable or disable runtime debug logging.
+- `/pinned-context-status` — show statistics for the last filtered request, including a table of every turn and whether it is used or dropped.
+- `/pinned-context-min-turns <n>` — change the minimum retained-turn floor for the active session. This does not modify the configuration file.
+- `/pinned-context-set-turns <n>` — keep only the `n` most recent turns for the active session; older turns are omitted from model requests.
 
 ## How it works
 
@@ -60,6 +59,37 @@ The `context_with_system` hook receives the complete request immediately before 
 3. Keeps assistant tool calls together with their tool results.
 4. Drops the oldest complete turns until the configured target is met.
 5. Returns a new request-local message array without changing the session transcript.
+
+### Visual example
+
+The full session remains intact, but the request sent to the model becomes a pinned prefix followed by the newest complete turns:
+
+```text
+Full session / transcript
+
++------------------+------+------+------+------+------+
+| Pinned system   | T1   | T2   | T3   | T4   | T5   |
+| prompt + tools  |      |      |      |      |      |
++------------------+------+------+------+------+------+
+                    ^^^^^  ^^^^^  ^^^^^  ^^^^^  ^^^^^
+                    older turns remain in the transcript
+
+Context request after budget pruning
+
++------------------+------+------+------+
+| Pinned system   | T3   | T4   | T5   |
+| prompt + tools  |      |      |      |
++------------------+------+------+------+
+                    dropped from this request: T1, T2
+```
+
+A turn is kept or dropped as a whole. For example, an assistant tool call and its result stay together:
+
+```text
+T4 = user message -> assistant tool call -> tool result -> assistant reply
+```
+
+With `/pinned-context-set-turns 2`, the request would instead contain the pinned prefix plus `T4` and `T5`. The dropped turns are not deleted and remain available in the session transcript.
 
 Pi's `custom`, `bashExecution`, `branchSummary`, and `compactionSummary` messages are treated as conversational because Pi converts them to user messages before sending them to the provider. Unknown extension roles remain pinned conservatively.
 

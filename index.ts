@@ -8,21 +8,27 @@ import { readFileSync } from "node:fs";
 export interface PinnedContextConfig {
   maxContextPercent: number;
   minRecentTurns: number;
-  debugLogging: boolean;
+  maxRecentTurns?: number;
 }
 
 const DEFAULT_CONFIG: PinnedContextConfig = {
   maxContextPercent: 0.9,
   minRecentTurns: 20,
-  debugLogging: false,
 };
 const CONFIG_FILE = join(homedir(), ".pi", "agent", "pinned-context.json");
 
 type Message = AgentMessage & { role?: string; content?: unknown; [key: string]: unknown };
 interface Turn { messages: Message[]; tokens: number; }
+interface TurnSnapshot {
+  index: number;
+  tokens: number;
+  retained: boolean;
+  roleCounts: Record<string, number>;
+}
 interface Snapshot {
   contextWindow: number; pinnedTokens: number; conversationTokens: number;
   retainedTurns: number; droppedTurns: number; totalTokens: number;
+  turns: TurnSnapshot[];
 }
 
 function loadConfig(): PinnedContextConfig {
@@ -33,7 +39,6 @@ function loadConfig(): PinnedContextConfig {
     return {
       maxContextPercent: typeof v.maxContextPercent === "number" && Number.isFinite(v.maxContextPercent) && v.maxContextPercent >= 0.01 && v.maxContextPercent <= 1 ? v.maxContextPercent : DEFAULT_CONFIG.maxContextPercent,
       minRecentTurns: typeof v.minRecentTurns === "number" && Number.isInteger(v.minRecentTurns) && v.minRecentTurns >= 0 ? v.minRecentTurns : DEFAULT_CONFIG.minRecentTurns,
-      debugLogging: typeof v.debugLogging === "boolean" ? v.debugLogging : DEFAULT_CONFIG.debugLogging,
     };
   } catch { return DEFAULT_CONFIG; }
 }
@@ -96,17 +101,33 @@ function prune(messages: Message[], contextWindow: number, config: PinnedContext
   const pinnedTokens = pinned.reduce((n, m) => n + messageTokens(m), 0);
   const turns = makeTurns(conversation);
   const budget = Math.max(1, Math.floor(contextWindow * config.maxContextPercent));
-  let retained = turns.slice();
+  let retained = config.maxRecentTurns === undefined
+    ? turns.slice()
+    : config.maxRecentTurns === 0
+      ? []
+      : turns.slice(-config.maxRecentTurns);
 
   // Remove complete oldest turns only. minRecentTurns is a floor, not a reason to split a turn.
   while (retained.length > config.minRecentTurns && pinnedTokens + retained.reduce((n, t) => n + t.tokens, 0) > budget) {
     retained.shift();
   }
   const result = [...pinned, ...retained.flatMap((t) => t.messages)];
+  const retainedSet = new Set(retained);
+  const turnSnapshots = turns.map((turn, index) => ({
+    index: index + 1,
+    tokens: turn.tokens,
+    retained: retainedSet.has(turn),
+    roleCounts: turn.messages.reduce<Record<string, number>>((counts, message) => {
+      const role = message.role ?? "unknown";
+      counts[role] = (counts[role] ?? 0) + 1;
+      return counts;
+    }, {}),
+  }));
   const snapshot: Snapshot = {
     contextWindow, pinnedTokens, conversationTokens: retained.reduce((n, t) => n + t.tokens, 0),
     retainedTurns: retained.length, droppedTurns: turns.length - retained.length,
     totalTokens: pinnedTokens + retained.reduce((n, t) => n + t.tokens, 0),
+    turns: turnSnapshots,
   };
   return { messages: result, snapshot };
 }
@@ -117,27 +138,47 @@ function contextWindow(ctx: ExtensionContext): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 128_000;
 }
 function format(s: Snapshot): string {
-  return [`Context window: ${s.contextWindow.toLocaleString()}`, `Token usage: ${s.totalTokens.toLocaleString()}`,
-    `Pinned tokens: ${s.pinnedTokens.toLocaleString()}`, `Conversation tokens: ${s.conversationTokens.toLocaleString()}`,
-    `Retained turns: ${s.retainedTurns}`, `Dropped turns: ${s.droppedTurns}`].join("\n");
+  const usagePercent = s.contextWindow > 0 ? (s.totalTokens / s.contextWindow * 100).toFixed(1) : "unknown";
+  const tableRows = s.turns.map((turn) => [
+    String(turn.index),
+    turn.tokens.toLocaleString(),
+    turn.retained ? "USED" : "DROPPED",
+    Object.entries(turn.roleCounts).map(([role, count]) => `${role}=${count}`).join(" "),
+  ]);
+  const headers = ["Turn", "Tokens", "Status", "Messages"];
+  const widths = headers.map((header, index) => Math.max(header.length, ...tableRows.map((row) => row[index].length)));
+  const line = `+-${widths.map((width) => "-".repeat(width)).join("-+-")}-+`;
+  const row = (values: string[]): string => `| ${values.map((value, index) => value.padEnd(widths[index])).join(" | ")} |`;
+  const table = [line, row(headers), line, ...tableRows.map(row), line];
+  if (tableRows.length === 0) table.splice(3, 0, "| No conversational turns".padEnd(line.length - 1) + "|");
+  return [
+    `Context window: ${s.contextWindow.toLocaleString()}`,
+    `Token usage: ${s.totalTokens.toLocaleString()} (${usagePercent}%)`,
+    `Pinned tokens: ${s.pinnedTokens.toLocaleString()}`,
+    `Conversation tokens: ${s.conversationTokens.toLocaleString()}`,
+    `Turns currently in context: ${s.retainedTurns}`,
+    `Dropped turns: ${s.droppedTurns}`,
+    "",
+    ...table,
+  ].join("\n");
 }
 
 export default function pinnedContext(pi: ExtensionAPI): void {
   let config = loadConfig();
-  let debugOverride: boolean | undefined;
+  let minRecentTurnsOverride: number | undefined;
+  let maxRecentTurnsOverride: number | undefined;
   let last: Snapshot | undefined;
-
-  const log = (s: Snapshot, debug: boolean): void => {
-    if (debug) console.error(`[PinnedContext]\nPinned tokens: ${s.pinnedTokens}\nConversation tokens: ${s.conversationTokens}\nDropped turns: ${s.droppedTurns}\nRetained turns: ${s.retainedTurns}`);
-  };
 
   pi.on("context_with_system", async (event, ctx) => {
     config = loadConfig();
-    const debug = debugOverride ?? config.debugLogging;
+    const minRecentTurns = maxRecentTurnsOverride ?? minRecentTurnsOverride ?? config.minRecentTurns;
     const input = event.messages as Message[];
-    const output = prune(input, contextWindow(ctx), { ...config, debugLogging: debug });
+    const output = prune(input, contextWindow(ctx), {
+      ...config,
+      minRecentTurns,
+      maxRecentTurns: maxRecentTurnsOverride,
+    });
     last = output.snapshot;
-    log(last, debug);
     return { messages: output.messages as AgentMessage[] };
   });
 
@@ -145,20 +186,44 @@ export default function pinnedContext(pi: ExtensionAPI): void {
     description: "Show pinned-prefix sliding-context statistics",
     handler: async (_args, ctx) => {
       if (!last) {
-        const usage = ctx.getContextUsage();
-        ctx.ui.notify(usage ? `Context window: ${usage.contextWindow.toLocaleString()}\nCurrent usage: ${usage.tokens ?? "unknown"}\nNo request has been filtered yet.` : "No model request has been filtered yet.", "info");
+        const messages = ctx.sessionManager.buildSessionContext().messages as Message[];
+        const preview = prune(messages, contextWindow(ctx), {
+          ...config,
+          minRecentTurns: maxRecentTurnsOverride ?? minRecentTurnsOverride ?? config.minRecentTurns,
+          maxRecentTurns: maxRecentTurnsOverride,
+        });
+        ctx.ui.notify(`${format(preview.snapshot)}\n\nNo model request has been filtered yet; this is a preview.`, "info");
         return;
       }
       ctx.ui.notify(format(last), "info");
     },
   });
-  pi.registerCommand("pinned-context-debug", {
-    description: "Enable or disable pinned-context debug logging",
+  pi.registerCommand("pinned-context-min-turns", {
+    description: "Set the minimum retained turns for this session",
     handler: async (args, ctx) => {
-      const value = args.trim().toLowerCase();
-      if (value !== "on" && value !== "off") { ctx.ui.notify("Usage: /pinned-context-debug on|off", "warning"); return; }
-      debugOverride = value === "on";
-      ctx.ui.notify(`Pinned-context debug logging ${debugOverride ? "enabled" : "disabled"}.`, "info");
+      const text = args.trim();
+      const value = Number(text);
+      if (!/^\d+$/.test(text) || !Number.isSafeInteger(value)) {
+        ctx.ui.notify("Usage: /pinned-context-min-turns <non-negative integer>", "warning");
+        return;
+      }
+      minRecentTurnsOverride = value;
+      maxRecentTurnsOverride = undefined;
+      ctx.ui.notify(`Minimum retained turns set to ${value} for this session.`, "info");
+    },
+  });
+  pi.registerCommand("pinned-context-set-turns", {
+    description: "Keep exactly this many most recent turns for this session",
+    handler: async (args, ctx) => {
+      const text = args.trim();
+      const value = Number(text);
+      if (!/^\d+$/.test(text) || !Number.isSafeInteger(value)) {
+        ctx.ui.notify("Usage: /pinned-context-set-turns <non-negative integer>", "warning");
+        return;
+      }
+      maxRecentTurnsOverride = value;
+      minRecentTurnsOverride = undefined;
+      ctx.ui.notify(`Context limited to the ${value} most recent turns for this session.`, "info");
     },
   });
 }

@@ -5,7 +5,6 @@
   "additionalProperties": false,
   "properties": {
     "maxContextPercent": { "type": "number", "minimum": 0.01, "maximum": 1, "default": 0.9, "description": "Fraction of the model context window available to the pinned prefix plus retained turns." },
-    "minRecentTurns": { "type": "integer", "minimum": 0, "default": 20, "description": "Complete recent turns retained before older turns are eligible for removal." },
-    "debugLogging": { "type": "boolean", "default": false }
+    "minRecentTurns": { "type": "integer", "minimum": 0, "default": 20, "description": "Complete recent turns retained before older turns are eligible for removal." }
   }
 }
